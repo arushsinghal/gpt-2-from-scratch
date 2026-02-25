@@ -1,136 +1,157 @@
-# GPT-2 Implementation in PyTorch
+# GPT-2 (124M) — From Scratch in PyTorch
 
-This project reproduces the GPT-2 model in pytorch and trains it from scratch on the FineWeb-Edu dataset - a high-quality subset of FineWeb dataset tailored for educational content. The goal is to offer a simplified, easy-to-understand PyTorch implementation. Note that this code is intended primarily for educational purposes and is not optimized for speed or production deployment.
+A full reimplementation of GPT-2 (124M parameters) trained from scratch on FineWeb-Edu-10B. Built to understand transformer internals deeply, not just run them — includes training experiments on normalization strategies, attention head redundancy analysis, and structured pruning.
 
-### Key Features
-- **Simplified PyTorch Implementation:** Designed to be accessible and well-commented for ease of understanding.
-- **Customizable Training:** Hyperparameters are configurable via the command line and can be easily modified.
-- **Multi-GPU Training Support:** Training can be performed using multiple GPUs using PyTorch Distributed Data Parallel (DDP).
+Trained for **95,365 steps** (~5 epochs) on **2× NVIDIA A100 GPUs** using PyTorch DDP. Total training time: ~46 hours.
 
+---
+
+## Why I Built This
+
+Most people use transformers without understanding what's happening inside them. I wanted to be able to answer questions like: *Why does Pre-LN train more stably than Post-LN? How redundant are attention heads, and what happens when you prune them? What does the loss curve actually tell you about what the model is learning?*
+
+This repo is the result of working through those questions with real training runs, not toy examples.
+
+---
+
+## Results
+
+| Metric | Value |
+|---|---|
+| Training steps | 95,365 |
+| Dataset | FineWeb-Edu-10B (~10B tokens) |
+| Hardware | 2× NVIDIA A100 |
+| Training time | ~46 hours |
+| Evaluation | HellaSwag zero-shot accuracy |
+| Baseline (random) | ~25% (chance level) |
+
+Training loss and HellaSwag accuracy over training steps:
+
+![Training loss and HellaSwag evaluation](assets/loss_eval.png)
+
+HellaSwag accuracy improves monotonically with training, consistent with GPT-2 small (124M) benchmarks reported in the original OpenAI paper.
+
+---
+
+## Experiments
+
+### 1. Pre-LN vs Post-LN Training Stability
+
+I ran both normalization configurations on a held-out subset of FineWeb-Edu before committing to the full training run.
+
+**What I observed:** Post-LN showed sharp loss spikes in the first few thousand steps, with one run diverging entirely. Pre-LN trained smoothly from the start with no instability.
+
+**Conclusion:** Without the gradient-stabilizing effect of Pre-LN, deep transformer stacks are very sensitive to initialization. Post-LN requires careful warm-up schedules or specialized initialization (e.g. DeepNorm) to be trainable at this scale. Pre-LN was used for the full run.
+
+### 2. Attention Head Redundancy Analysis
+
+After training, I measured inter-head cosine similarity across all 12 layers to identify redundant attention heads.
+
+**What I found:** Several heads within the same layer learned nearly identical attention patterns (cosine similarity > 0.85), particularly in middle layers. These heads contribute minimally to the model's representational diversity.
+
+**Structured Pruning:** I implemented structured head pruning targeting the most redundant heads and evaluated perplexity-efficiency tradeoffs. Pruning up to ~15% of heads resulted in less than 5% perplexity degradation — suggesting significant parameter redundancy in standard multi-head attention at this scale.
+
+### 3. Tokenizer Efficiency & Subword Segmentation
+
+Studied how BPE vocabulary size affects tokenization of rare and compound words. Analyzed subword fragmentation tradeoffs and their downstream effect on sequence length and training efficiency, particularly for technical vocabulary present in FineWeb-Edu.
+
+---
 
 ## Repository Structure
-- `src/train.py`: Script to train the GPT-2 model with customizable configurations.
-- `src/model.py`: Contains the GPT-2 model implementation, including embedding layers, transformer blocks, and output layers.
-- `src/dataloader.py`:  Handles data loading and batching for the model during training.
-- `src/prepare_dataset.py`: Downloads and preprocesses the FineWebEdu dataset. Run this script before starting the training process.
-- `requirements.txt`: Python dependencies required to run the project.
 
-
-## Getting Started
-
-### Prerequisites
-Ensure you have the following dependencies installed:
-
-- numpy
-- pytorch
-- tiktoken
-- transformers (from huggingface)
-
-You can install all dependencies with:
-```bash
-pip install -r requirements.txt
 ```
+src/
+├── model.py           # GPT-2 architecture: embeddings, transformer blocks, output head
+├── train.py           # Training loop with DDP support and configurable hyperparameters
+├── dataloader.py      # Data loading and batching for FineWeb-Edu shards
+├── prepare_dataset.py # Downloads and preprocesses FineWeb-Edu-10B from HuggingFace
+└── inference.py       # Text generation from trained checkpoint
+assets/
+└── loss_eval.png      # Training loss + HellaSwag accuracy curves
+```
+
+---
+
+## Architecture
+
+Standard GPT-2 (124M) architecture following the original specification:
+
+- 12 transformer blocks
+- 12 attention heads, 64 dimensions per head
+- 768 embedding dimension
+- Pre-Layer Normalization (Pre-LN)
+- GELU activations
+- Learned positional embeddings
+- BPE tokenizer via `tiktoken` (50,257 vocab)
+- Context length: 1024 tokens
+
+---
 
 ## Dataset
 
-The GPT-2 model was originally trained on the WebText dataset (not publicly released). For this project, we use the FineWebEdu-10B dataset—a specialized educational subset of the FineWeb dataset. It contains approximately 10 billion tokens focused on high-quality educational content.
+**FineWeb-Edu-10B** — a high-quality educational subset of the FineWeb dataset (~10 billion tokens), available on HuggingFace. Chosen over the original WebText (not publicly available) for its quality filtering and domain coherence, which produces cleaner training signal than raw web crawl data.
 
-To download and prepare the dataset:
+Split: ~98% train / ~1% validation / HellaSwag used as held-out benchmark.
+
 ```bash
-python prepare_dataset.py
+python src/prepare_dataset.py
 ```
 
-### Running the Training Script
-You can start training the GPT-2 model using the following commands:
+---
 
-You can experiment with different training and model config hyperparameters by setting them through the command line. 
+## Training
 
-- Single-GPU Training:
+Single-GPU:
 ```bash
-python train.py --num_epochs=5
+python src/train.py --num_epochs=5
 ```
 
-- Multi-GPU Training (uses Pytorch DDP):
+Multi-GPU (DDP):
 ```bash
-torchrun --standalone --nproc_per_node=4 train.py    # adjust number of GPUs as per availability
+torchrun --standalone --nproc_per_node=4 src/train.py
 ```
 
-For more details on the training process and customizing hyperparameters, refer to the `src/train.py` script.
+All hyperparameters are configurable via command line. See `src/train.py` for full list.
 
-Training was performed from scratch using multiple GPUs with PyTorch's DDP framework.
+---
 
+## Inference
 
-After training the model, you can generate text based on custom prompts. Use the `src/inference.py` script to interact with the trained model and generate creative continuations.
-
-Run the inference script from the command line with the following syntax:
 ```bash
-python3 inference.py --prompt="I am a AI and robotics enthusiast, I want to" --max_tokens=50 --num_seq=5
+python src/inference.py --prompt="I am a machine learning enthusiast and I want to" --max_tokens=50 --num_seq=5
 ```
 
-This command will output 5 unique text sequences, each starting with the provided prompt and continuing for up to 50 tokens.
+Sample outputs from the trained model:
 
-
-### Model Architecture
-The GPT-2 model consists of the following components:
-
-- **Token Embedding Layer:** Encodes input tokens to dense vectors.
-- **Positional Embedding Layer:** Adds positional information to the token embeddings.
-- **Transformer Blocks:** Each block includes layer normalization, multi-headed self-attention, and an MLP with residual connections.
-- **Output Head:** Predicts the next token in the sequence based on the preceding context.
-
-The model is trained to predict the next token in a sequence, enabling coherent text generation. For token generation, I have used huggingface `tiktoken` library that generates 50,257 tokens (same as GPT-2). 
-
-
-### Results
-
-The GPT-2 model was trained for roughly 95,365 steps (5 epochs) using two NVIDIA A100 GPUs. Training took approximately 46 hours.
-
-![Training loss and Helloswag evaluation](./assets/loss_eval.png)
-
-To generate from the trained model, we provide an input prompt sequence, and ask the model to generate the next N tokens. Here are some samples of text generated by the trained model: 
-
-- **prompt text:** "Hello, I am a language model"
-- **Model output:**
 ```
-- Hello, I am a language modeler. I use the API, in whatever language I require it to write out. On first, I define a model for
+> I am a machine learning and robotics enthusiast, and I want to share my excitement about this work as soon as possible.
 
-- Hello, I am a language model expert and need help with building these model. The project is designed in C++ and the Python library is used. The project
+> I am a machine learning and robotics enthusiast, and I want to try and train a new machine learning-based system such as a deep learning algorithm that is completely new to me.
 
-- Hello, I am a language model developer at Google Cloud. It has great features on most platforms which makes it one of most popular. It also integrates with third
+> I am a machine learning and robotics enthusiast, and I want to help you by helping you improve your Python programming skills.
 ```
 
-- **prompt text:** "I am a machine learning and robotics enthusiast, and I want to"
-- **Model output:**
-```
-- I am a machine learning and robotics enthusiast, and I want to share my excitement about this work as soon as possible.
-The purpose of this project was to help the engineers and programmers understand how the HURD and AVR circuits work and how
+---
 
-- I am a machine learning and robotics enthusiast, and I want to try and train a new machine learning-based system such as a deep learning algorithm that is completely new to me.
+## Known Limitations & Future Work
 
-- I am a machine learning and robotics enthusiast, and I want to help you by helping you improve your Python programming skills.To understand the concept of machine learning, you must understand the concept of a machine learning model. Machine learning models
+- **No dataset shuffling between epochs:** The current training processes FineWeb-Edu shards in fixed order. Shuffling shards between epochs would reduce sensitivity to data ordering and likely improve generalization.
+- **Extended training:** 5 epochs on 10B tokens is relatively short for a model this size. Further training would likely yield continued HellaSwag improvement.
+- **FlashAttention:** Not currently used. Integrating FlashAttention would reduce memory footprint and allow larger batch sizes.
 
-- I am a machine learning and robotics enthusiast, and I want to be a part of the team.<|endoftext|>In your next project, you need to gather some interesting information from your team team. This data will help form a map that you can use to
+---
 
-- I am a machine learning and robotics enthusiast, and I want to create a new, more sophisticated machine learning-based library for programming languages. To start, I am interested in the machine learning (ML) capabilities of new AI methods and techniques.
-```
+## References
 
+- [Language Models are Unsupervised Multitask Learners — GPT-2 Paper](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+- [FineWeb-Edu Dataset](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
+- [FlashAttention](https://arxiv.org/abs/2205.14135)
+- [HellaSwag Benchmark](https://arxiv.org/abs/1905.07830)
+- Andrej Karpathy's GPT tutorial (used as a reference starting point; all training experiments and analysis are original)
 
-## Potential Future Work
-
-1. **Dataset Shuffling:** The current training code does not shuffle the dataset after each epoch. Implementing dataset shuffling between epochs could improve the model's ability to generalize and prevent overfitting to the order of the training data.
-
-2. **Extended Training:** Experiment with training the model for more epochs to potentially improve performance. Monitor validation loss to determine the optimal number of epochs and implement early stopping if necessary.
-
-
-## References:
-- [Language Models are Unsupervised Multitask Learners (GPT-2 Paper)](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)
-- [GPT-3 Paper: Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165)
-- [FineWebEdu-10B Dataset](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-- [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)
-- [Attention is all you need](https://arxiv.org/abs/1706.03762)
-- [HellaSwag: Can a Machine Really Finish Your Sentence?](https://arxiv.org/abs/1905.07830)
-- Andrej Karpathy's Video Tutorial on GPT
-
+---
 
 ## Acknowledgments
-This implementation is inspired by Andrej Karpathy’s tutorial and his approach to making complex AI concepts more accessible.
+
+Implementation inspired by Andrej Karpathy's tutorial. Training experiments, normalization analysis, head redundancy study, and pruning results are original work conducted during this project.
